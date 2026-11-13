@@ -25,6 +25,13 @@ MPC320 — это 3 моторизованных лепестка (аналог 
     python mpc320_control.py identify              # мигнуть LED на приборе
     python mpc320_control.py scan 2 0 170 5        # сканировать лепесток 2: от 0° до 170° с шагом 5°
 
+Эмулятор (проверка логики БЕЗ физического прибора):
+    python mpc320_control.py --simulate status
+    python mpc320_control.py --simulate set 45 90 30
+    python mpc320_control.py --simulate scan 2 0 170 5
+Эмулятор ведёт себя как настоящий MPC320, но движения происходят
+"в компьютере". Реальную связь с железом это не проверяет.
+
 Использование как модуля:
     from pnpq.apt.connection import AptConnection
     from pnpq.apt.protocol import ChanIdent
@@ -53,6 +60,14 @@ from pnpq.devices.polarization_controller_thorlabs_mpc import (
     PolarizationControllerThorlabsMPC320,
 )
 from pnpq.units import pnpq_ureg
+
+try:
+    from pnpq.devices.polarization_controller_thorlabs_mpc_stub import (
+        PolarizationControllerThorlabsMPC320Stub,
+    )
+    STUB_AVAILABLE = True
+except ImportError:  # старые версии pnpq без эмулятора
+    STUB_AVAILABLE = False
 
 CHANNELS = (ChanIdent.CHANNEL_1, ChanIdent.CHANNEL_2, ChanIdent.CHANNEL_3)
 
@@ -94,9 +109,9 @@ def check_angle(angle: float) -> float:
 def set_angles(mpc: PolarizationControllerThorlabsMPC320,
                a1: float, a2: float, a3: float) -> None:
     """Повернуть лепестки 1, 2, 3 в заданные углы (градусы)."""
-    for chan, ang in zip(CHANNELS, (a1, a2, a3)):
+    for idx, (chan, ang) in enumerate(zip(CHANNELS, (a1, a2, a3)), start=1):
         check_angle(ang)
-        print(f"Лепесток {chan.value}: движение к {ang:.2f}° ...")
+        print(f"Лепесток {idx}: движение к {ang:.2f}° ...")
         mpc.move_absolute(chan, ang * pnpq_ureg.degree)
     print("Все лепестки на месте.")
 
@@ -112,8 +127,8 @@ def get_angles(mpc: PolarizationControllerThorlabsMPC320) -> list[float]:
 
 
 def print_status(mpc: PolarizationControllerThorlabsMPC320) -> None:
-    for chan, deg in zip(CHANNELS, get_angles(mpc)):
-        print(f"Лепесток {chan.value}: {deg:.2f}°")
+    for idx, (chan, deg) in enumerate(zip(CHANNELS, get_angles(mpc)), start=1):
+        print(f"Лепесток {idx}: {deg:.2f}°")
 
 
 def scan(mpc: PolarizationControllerThorlabsMPC320, channel: int,
@@ -142,6 +157,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Управление поляризационным контроллером Thorlabs MPC320")
     parser.add_argument("--serial", help="серийный номер прибора (если не задан — автоопределение)")
+    parser.add_argument("--simulate", action="store_true",
+                        help="работа с эмулятором вместо реального прибора")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("list", help="найти подключённые приборы и их серийные номера")
@@ -169,31 +186,44 @@ def main() -> None:
         list_devices()
         return
 
+    if args.simulate:
+        if not STUB_AVAILABLE:
+            raise SystemExit("Эмулятор недоступен: обновите библиотеку (pip install -U pnpq)")
+        # Эмулятор: вся логика скрипта работает без физического прибора.
+        # time_scaling_factor=0.2 имитирует время движения лепестков
+        # (в 5 раз быстрее реальности); 0.0 — мгновенные движения.
+        mpc = PolarizationControllerThorlabsMPC320Stub(time_scaling_factor=0.2)
+        run_command(args, mpc)
+        return
+
     serial_number = args.serial or autodetect_serial()
 
     with AptConnection(serial_number=serial_number) as conn:
         mpc = PolarizationControllerThorlabsMPC320(connection=conn)
+        run_command(args, mpc)
 
-        if args.cmd == "status":
-            print_status(mpc)
-        elif args.cmd == "identify":
-            mpc.identify(ChanIdent.CHANNEL_1)
-            print("LED на приборе мигает.")
-        elif args.cmd == "set":
-            set_angles(mpc, *args.angles)
-        elif args.cmd == "home":
-            # По мануалу home перед работой не обязателен:
-            # прибор запоминает позиции лепестков при включении.
-            if args.channel:
-                print(f"Homing лепестка {args.channel} ...")
-                mpc.home(CHANNELS[args.channel - 1])
-            else:
-                print("Homing всех лепестков ...")
-                for chan in CHANNELS:
-                    mpc.home(chan)
-            print("Готово.")
-        elif args.cmd == "scan":
-            scan(mpc, args.channel, args.start, args.stop, args.step, args.delay)
+
+def run_command(args, mpc) -> None:
+    if args.cmd == "status":
+        print_status(mpc)
+    elif args.cmd == "identify":
+        mpc.identify(ChanIdent.CHANNEL_1)
+        print("LED на приборе мигает.")
+    elif args.cmd == "set":
+        set_angles(mpc, *args.angles)
+    elif args.cmd == "home":
+        # По мануалу home перед работой не обязателен:
+        # прибор запоминает позиции лепестков при включении.
+        if args.channel:
+            print(f"Homing лепестка {args.channel} ...")
+            mpc.home(CHANNELS[args.channel - 1])
+        else:
+            print("Homing всех лепестков ...")
+            for chan in CHANNELS:
+                mpc.home(chan)
+        print("Готово.")
+    elif args.cmd == "scan":
+        scan(mpc, args.channel, args.start, args.stop, args.step, args.delay)
 
 
 if __name__ == "__main__":
@@ -202,3 +232,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nОстановлено пользователем.")
         sys.exit(130)
+    except ValueError as e:
+        print(f"Ошибка: {e}")
+        sys.exit(1)
